@@ -299,20 +299,16 @@ enum rw_hint {
 	WRITE_LIFE_EXTREME	= RWH_WRITE_LIFE_EXTREME,
 };
 
-/* Match RWF_* bits to IOCB bits */
-#define IOCB_HIPRI		(__force int) RWF_HIPRI
-#define IOCB_DSYNC		(__force int) RWF_DSYNC
-#define IOCB_SYNC		(__force int) RWF_SYNC
-#define IOCB_NOWAIT		(__force int) RWF_NOWAIT
-#define IOCB_APPEND		(__force int) RWF_APPEND
-
-/* non-RWF related bits - start at 16 */
-#define IOCB_EVENTFD		(1 << 16)
-#define IOCB_DIRECT		(1 << 17)
-#define IOCB_WRITE		(1 << 18)
-/* iocb->ki_waitq is valid */
-#define IOCB_WAITQ		(1 << 19)
-#define IOCB_NOIO		(1 << 20)
+#define IOCB_EVENTFD		(1 << 0)
+#define IOCB_APPEND		(1 << 1)
+#define IOCB_DIRECT		(1 << 2)
+#define IOCB_HIPRI		(1 << 3)
+#define IOCB_DSYNC		(1 << 4)
+#define IOCB_SYNC		(1 << 5)
+#define IOCB_WRITE		(1 << 6)
+#define IOCB_NOWAIT		(1 << 7)
+/* kiocb is a read or write operation submitted by fs/aio.c. */
+#define IOCB_AIO_RW		(1 << 23)
 
 struct kiocb {
 	struct file		*ki_filp;
@@ -1398,6 +1394,8 @@ extern int send_sigurg(struct fown_struct *fown);
 #define SB_I_IMA_UNVERIFIABLE_SIGNATURE	0x00000020
 #define SB_I_UNTRUSTED_MOUNTER		0x00000040
 
+#define SB_I_SKIP_SYNC	0x00000100	/* Skip superblock at global sync */
+
 /* Possible states of 'frozen' field */
 enum {
 	SB_UNFROZEN = 0,		/* FS is unfrozen */
@@ -1726,6 +1724,12 @@ int vfs_mkobj(struct dentry *, umode_t,
 int vfs_mkobj2(struct vfsmount *, struct dentry *, umode_t,
 		int (*f)(struct dentry *, umode_t, void *),
 		void *);
+
+int vfs_fchown(struct file *file, uid_t user, gid_t group);
+int vfs_fchmod(struct file *file, umode_t mode);
+
+int vfs_fchown(struct file *file, uid_t user, gid_t group);
+int vfs_fchmod(struct file *file, umode_t mode);
 
 extern long vfs_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 

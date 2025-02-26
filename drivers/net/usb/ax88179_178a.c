@@ -126,240 +126,520 @@ int ax88179_read_eeprom(struct ax_device *axdev, struct _ax_ioctl_command *info)
 				break;
 		}
 	} else {
-		for (i = 0; i < info->size; i++) {
-			if (ax_read_cmd(axdev, AX_ACCESS_EFUSE, i,
-					     1, 2, &tmp, 1) < 0) {
-				kfree(buf);
-				return -EINVAL;
-			}
-			*(buf + i) = be16_to_cpu(tmp);
-			if (i == (info->size - 1))
-				break;
-		}
-	}
-
-	if (copy_to_user(info->buf, buf, sizeof(unsigned short) * info->size)) {
-		kfree(buf);
-		return -EFAULT;
-	}
-
-	kfree(buf);
-
-	return 0;
-}
-
-int ax88179_write_eeprom(struct ax_device *axdev,
-			 struct _ax_ioctl_command *info)
-{
-	int i;
-	u16 data, csum = 0;
-	unsigned short *buf;
-
-	if (info->buf != NULL) {
-		buf = kmalloc_array(info->size, sizeof(unsigned short),
-				    GFP_KERNEL);
-		if (!buf) {
-#if KERNEL_VERSION(2, 6, 34) <= LINUX_VERSION_CODE
-			netdev_err(axdev->netdev,
-				   "Cannot allocate memory for buffer");
-#endif
-			return -ENOMEM;
-		}
-		if (copy_from_user(buf, info->buf,
-				   sizeof(unsigned short) * info->size)) {
-			kfree(buf);
-			return -EFAULT;
-		}
-	} else {
-		netdev_err(axdev->netdev,
-			   "The EEPROM buffer cannot be NULL. \r\n");
-		return -EINVAL;
-	}
-
-	if (info->type == 0) {
-		if ((*(buf) >> 8) & 0x01) {
-			netdev_info(axdev->netdev,
-				"Cannot be set to muliticast MAC address, ");
-			netdev_info(axdev->netdev,
-				"bit0 of Node ID-0 cannot be set to 1. \r\n");
-			kfree(buf);
-			return -EINVAL;
-		}
-
-		csum = (*(buf + 3) & 0xff) + ((*(buf + 3) >> 8) & 0xff) +
-		       (*(buf + 4) & 0xff) + ((*(buf + 4) >> 8) & 0xff);
-		csum = 0xff - ((csum >> 8) + (csum & 0xff));
-		data = ((*(buf + 5)) & 0xff) | (csum << 8);
-		*(buf + 5) = data;
-
-		for (i = 0; i < info->size; i++) {
-			data = cpu_to_be16(*(buf + i));
-			if (ax_write_cmd(axdev, AX_ACCESS_EEPROM,
-					      i, 1, 2, &data) < 0) {
-				kfree(buf);
-				return -EINVAL;
-			}
-
-			mdelay(info->delay);
-		}
-	} else if (info->type == 1) {
-		if ((*(buf) >> 8) & 0x01) {
-			netdev_info(axdev->netdev,
-				"Cannot be set to muliticast MAC address, ");
-			netdev_info(axdev->netdev,
-				"bit0 of Node ID-0 cannot be set to 1. \r\n");
-			kfree(buf);
-			return -EINVAL;
-		}
-
-		for (i = 0; i < info->size; i++)
-			csum += (*(buf + i)&0xff) + ((*(buf + i) >> 8)&0xff);
-
-		csum -= ((*(buf + 0x19) >> 8) & 0xff);
-		while (csum > 255)
-			csum = (csum & 0x00FF) + ((csum >> 8) & 0x00FF);
-		csum = 0xFF - csum;
-
-		data = ((*(buf + 0x19)) & 0xff) | (csum << 8);
-		*(buf + 0x19) = data;
-
-		if (ax_write_cmd(axdev, AX_WRITE_EFUSE_EN,
-				      0, 0, 0, NULL) < 0) {
-			kfree(buf);
-			return -EINVAL;
-		}
-
-		mdelay(info->delay);
-
-		for (i = 0; i < info->size; i++) {
-			data = cpu_to_be16(*(buf + i));
-			if (ax_write_cmd(axdev, AX_ACCESS_EFUSE,
-					      i, 1, 2, &data) < 0) {
-				kfree(buf);
-				return -EINVAL;
-			}
-
-			mdelay(info->delay);
-		}
-
-		if (ax_write_cmd(axdev, AX_WRITE_EFUSE_DIS,
-				 0, 0, 0, NULL) < 0) {
-			kfree(buf);
-			return -EINVAL;
-		}
-
-		mdelay(info->delay);
-	} else if (info->type == 2) {
-		if (ax_read_cmd(axdev, AX_ACCESS_EFUSE,
-				0, 1, 2, &data, 1) < 0) {
-			kfree(buf);
-			return -EINVAL;
-		}
-
-		if (data == 0xFFFF)
-			info->type = 0;
-		else
-			info->type = 1;
-	} else {
-		kfree(buf);
-		return -EINVAL;
-	}
-
-	kfree(buf);
-	return 0;
-}
-
-IOCTRL_TABLE ax88179_tbl[] = {
-	ax88179_signature,
-	NULL,//ax_usb_command,
-	ax88179_read_eeprom,
-	ax88179_write_eeprom,
-};
-
-#if KERNEL_VERSION(5, 15, 0) <= LINUX_VERSION_CODE
-int ax88179_siocdevprivate(struct net_device *netdev, struct ifreq *rq,
-			   void __user *udata, int cmd)
-{
-	struct ax_device *axdev = netdev_priv(netdev);
-	struct _ax_ioctl_command info;
-	struct _ax_ioctl_command *uptr =
-				(struct _ax_ioctl_command *) rq->ifr_data;
-	int ret = 0;
-
-	switch (cmd) {
-	case AX_PRIVATE:
-		if (copy_from_user(&info, uptr,
-				   sizeof(struct _ax_ioctl_command)))
-			return -EFAULT;
-
-		if ((*ax88179_tbl[info.ioctl_cmd])(axdev, &info) < 0) {
-			netdev_info(netdev, "ax88179_tbl, return -EFAULT");
-			return -EFAULT;
-		}
-
-		if (copy_to_user(uptr, &info, sizeof(struct _ax_ioctl_command)))
-			return -EFAULT;
-
-		break;
-	default:
-		ret = -EOPNOTSUPP;
+		ret = __ax88179_write_cmd(dev, cmd, value, index,
+					  size, data, 0);
 	}
 
 	return ret;
 }
 
-int ax88179_ioctl(struct net_device *netdev, struct ifreq *rq, int cmd)
+static void ax88179_status(struct usbnet *dev, struct urb *urb)
 {
-	struct ax_device *axdev = netdev_priv(netdev);
+	struct ax88179_int_data *event;
+	u32 link;
 
-	return generic_mii_ioctl(&axdev->mii, if_mii(rq), cmd, NULL);
-}
-#else
-int ax88179_ioctl(struct net_device *netdev, struct ifreq *rq, int cmd)
-{
-	struct ax_device *axdev = netdev_priv(netdev);
-	struct _ax_ioctl_command info;
-	struct _ax_ioctl_command *uptr =
-				(struct _ax_ioctl_command *) rq->ifr_data;
-
-	switch (cmd) {
-	case AX_PRIVATE:
-		if (copy_from_user(&info, uptr,
-				   sizeof(struct _ax_ioctl_command)))
-			return -EFAULT;
-
-		if ((*ax88179_tbl[info.ioctl_cmd])(axdev, &info) < 0) {
-			netdev_info(netdev, "ax88179_tbl, return -EFAULT");
-			return -EFAULT;
-		}
-
-		if (copy_to_user(uptr, &info, sizeof(struct _ax_ioctl_command)))
-			return -EFAULT;
-
-		break;
-	default:
-		return  generic_mii_ioctl(&axdev->mii, if_mii(rq), cmd, NULL);
-	}
-	return 0;
-}
-#endif
-
-void ax88179_set_multicast(struct net_device *net)
-{
-	struct ax_device *axdev = netdev_priv(net);
-	u8 *m_filter = axdev->m_filter;
-	int mc_count = 0;
-
-	if (!test_bit(AX_ENABLE, &axdev->flags))
+	if (urb->actual_length < 8)
 		return;
 
-#if KERNEL_VERSION(2, 6, 35) > LINUX_VERSION_CODE
-	mc_count = net->mc_count;
-#else
-	mc_count = netdev_mc_count(net);
-#endif
+	event = urb->transfer_buffer;
+	le32_to_cpus((void *)&event->intdata1);
 
-	axdev->rxctl = (AX_RX_CTL_START | AX_RX_CTL_AB);
+	link = (((__force u32)event->intdata1) & AX_INT_PPLS_LINK) >> 16;
+
+	if (netif_carrier_ok(dev->net) != link) {
+		usbnet_link_change(dev, link, 1);
+		if (!link)
+			netdev_info(dev->net, "ax88179 - Link status is: 0\n");
+	}
+}
+
+static int ax88179_mdio_read(struct net_device *netdev, int phy_id, int loc)
+{
+	struct usbnet *dev = netdev_priv(netdev);
+	u16 res;
+
+	ax88179_read_cmd(dev, AX_ACCESS_PHY, phy_id, (__u16)loc, 2, &res);
+	return res;
+}
+
+int ax88179_write_eeprom(struct ax_device *axdev,
+			 struct _ax_ioctl_command *info)
+{
+	struct usbnet *dev = netdev_priv(netdev);
+	u16 res = (u16) val;
+
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, phy_id, (__u16)loc, 2, &res);
+}
+
+static inline int ax88179_phy_mmd_indirect(struct usbnet *dev, u16 prtad,
+					   u16 devad)
+{
+	u16 tmp16;
+	int ret;
+
+	tmp16 = devad;
+	ret = ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+				MII_MMD_CTRL, 2, &tmp16);
+
+	tmp16 = prtad;
+	ret = ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+				MII_MMD_DATA, 2, &tmp16);
+
+	tmp16 = devad | MII_MMD_CTRL_NOINCR;
+	ret = ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+				MII_MMD_CTRL, 2, &tmp16);
+
+	return ret;
+}
+
+static int
+ax88179_phy_read_mmd_indirect(struct usbnet *dev, u16 prtad, u16 devad)
+{
+	int ret;
+	u16 tmp16;
+
+	ax88179_phy_mmd_indirect(dev, prtad, devad);
+
+	ret = ax88179_read_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			       MII_MMD_DATA, 2, &tmp16);
+	if (ret < 0)
+		return ret;
+
+	return tmp16;
+}
+
+static int
+ax88179_phy_write_mmd_indirect(struct usbnet *dev, u16 prtad, u16 devad,
+			       u16 data)
+{
+	int ret;
+
+	ax88179_phy_mmd_indirect(dev, prtad, devad);
+
+	ret = ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+				MII_MMD_DATA, 2, &data);
+
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
+static int ax88179_suspend(struct usb_interface *intf, pm_message_t message)
+{
+	struct usbnet *dev = usb_get_intfdata(intf);
+	u16 tmp16;
+	u8 tmp8;
+
+	usbnet_suspend(intf, message);
+
+	/* Disable RX path */
+	ax88179_read_cmd_nopm(dev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
+			      2, 2, &tmp16);
+	tmp16 &= ~AX_MEDIUM_RECEIVE_EN;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
+			       2, 2, &tmp16);
+
+	/* Force bulk-in zero length */
+	ax88179_read_cmd_nopm(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
+			      2, 2, &tmp16);
+
+	tmp16 |= AX_PHYPWR_RSTCTL_BZ | AX_PHYPWR_RSTCTL_IPRL;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
+			       2, 2, &tmp16);
+
+	/* change clock */
+	tmp8 = 0;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &tmp8);
+
+	/* Configure RX control register => stop operation */
+	tmp16 = AX_RX_CTL_STOP;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_RX_CTL, 2, 2, &tmp16);
+
+	return 0;
+}
+
+/* This function is used to enable the autodetach function. */
+/* This function is determined by offset 0x43 of EEPROM */
+static int ax88179_auto_detach(struct usbnet *dev, int in_pm)
+{
+	u16 tmp16;
+	u8 tmp8;
+	int (*fnr)(struct usbnet *, u8, u16, u16, u16, void *);
+	int (*fnw)(struct usbnet *, u8, u16, u16, u16, void *);
+
+	if (!in_pm) {
+		fnr = ax88179_read_cmd;
+		fnw = ax88179_write_cmd;
+	} else {
+		fnr = ax88179_read_cmd_nopm;
+		fnw = ax88179_write_cmd_nopm;
+	}
+
+	if (fnr(dev, AX_ACCESS_EEPROM, 0x43, 1, 2, &tmp16) < 0)
+		return 0;
+
+	if ((tmp16 == 0xFFFF) || (!(tmp16 & 0x0100)))
+		return 0;
+
+	/* Enable Auto Detach bit */
+	tmp8 = 0;
+	fnr(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &tmp8);
+	tmp8 |= AX_CLK_SELECT_ULR;
+	fnw(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &tmp8);
+
+	fnr(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, &tmp16);
+	tmp16 |= AX_PHYPWR_RSTCTL_AT;
+	fnw(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, &tmp16);
+
+	return 0;
+}
+
+static int ax88179_resume(struct usb_interface *intf)
+{
+	struct usbnet *dev = usb_get_intfdata(intf);
+	u16 tmp16;
+	u8 tmp8;
+
+	usbnet_link_change(dev, 0, 0);
+
+	/* Power up ethernet PHY */
+	tmp16 = 0;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
+			       2, 2, &tmp16);
+	udelay(1000);
+
+	tmp16 = AX_PHYPWR_RSTCTL_IPRL;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
+			       2, 2, &tmp16);
+	msleep(200);
+
+	/* Ethernet PHY Auto Detach*/
+	ax88179_auto_detach(dev, 1);
+
+	/* Enable clock */
+	ax88179_read_cmd_nopm(dev, AX_ACCESS_MAC,  AX_CLK_SELECT, 1, 1, &tmp8);
+	tmp8 |= AX_CLK_SELECT_ACS | AX_CLK_SELECT_BCS;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &tmp8);
+	msleep(100);
+
+	/* Configure RX control register => start operation */
+	tmp16 = AX_RX_CTL_DROPCRCERR | AX_RX_CTL_IPE | AX_RX_CTL_START |
+		AX_RX_CTL_AP | AX_RX_CTL_AMALL | AX_RX_CTL_AB;
+	ax88179_write_cmd_nopm(dev, AX_ACCESS_MAC, AX_RX_CTL, 2, 2, &tmp16);
+
+	return usbnet_resume(intf);
+}
+
+static void
+ax88179_get_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
+{
+	struct usbnet *dev = netdev_priv(net);
+	u8 opt;
+
+	if (ax88179_read_cmd(dev, AX_ACCESS_MAC, AX_MONITOR_MOD,
+			     1, 1, &opt) < 0) {
+		wolinfo->supported = 0;
+		wolinfo->wolopts = 0;
+		return;
+	}
+
+	wolinfo->supported = WAKE_PHY | WAKE_MAGIC;
+	wolinfo->wolopts = 0;
+	if (opt & AX_MONITOR_MODE_RWLC)
+		wolinfo->wolopts |= WAKE_PHY;
+	if (opt & AX_MONITOR_MODE_RWMP)
+		wolinfo->wolopts |= WAKE_MAGIC;
+}
+
+static int
+ax88179_set_wol(struct net_device *net, struct ethtool_wolinfo *wolinfo)
+{
+	struct usbnet *dev = netdev_priv(net);
+	u8 opt = 0;
+
+	if (wolinfo->wolopts & ~(WAKE_PHY | WAKE_MAGIC))
+		return -EINVAL;
+
+	if (wolinfo->wolopts & WAKE_PHY)
+		opt |= AX_MONITOR_MODE_RWLC;
+	if (wolinfo->wolopts & WAKE_MAGIC)
+		opt |= AX_MONITOR_MODE_RWMP;
+
+	if (ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_MONITOR_MOD,
+			      1, 1, &opt) < 0)
+		return -EINVAL;
+
+	return 0;
+}
+
+static int ax88179_get_eeprom_len(struct net_device *net)
+{
+	return AX_EEPROM_LEN;
+}
+
+static int
+ax88179_get_eeprom(struct net_device *net, struct ethtool_eeprom *eeprom,
+		   u8 *data)
+{
+	struct usbnet *dev = netdev_priv(net);
+	u16 *eeprom_buff;
+	int first_word, last_word;
+	int i, ret;
+
+	if (eeprom->len == 0)
+		return -EINVAL;
+
+	eeprom->magic = AX88179_EEPROM_MAGIC;
+
+	first_word = eeprom->offset >> 1;
+	last_word = (eeprom->offset + eeprom->len - 1) >> 1;
+	eeprom_buff = kmalloc_array(last_word - first_word + 1, sizeof(u16),
+				    GFP_KERNEL);
+	if (!eeprom_buff)
+		return -ENOMEM;
+
+	/* ax88179/178A returns 2 bytes from eeprom on read */
+	for (i = first_word; i <= last_word; i++) {
+		ret = __ax88179_read_cmd(dev, AX_ACCESS_EEPROM, i, 1, 2,
+					 &eeprom_buff[i - first_word],
+					 0);
+		if (ret < 0) {
+			kfree(eeprom_buff);
+			return -EIO;
+		}
+	}
+
+	memcpy(data, (u8 *)eeprom_buff + (eeprom->offset & 1), eeprom->len);
+	kfree(eeprom_buff);
+	return 0;
+}
+
+static int ax88179_get_link_ksettings(struct net_device *net,
+				      struct ethtool_link_ksettings *cmd)
+{
+	struct usbnet *dev = netdev_priv(net);
+
+	mii_ethtool_get_link_ksettings(&dev->mii, cmd);
+
+	return 0;
+}
+
+static int ax88179_set_link_ksettings(struct net_device *net,
+				      const struct ethtool_link_ksettings *cmd)
+{
+	struct usbnet *dev = netdev_priv(net);
+	return mii_ethtool_set_link_ksettings(&dev->mii, cmd);
+}
+
+static int
+ax88179_ethtool_get_eee(struct usbnet *dev, struct ethtool_eee *data)
+{
+	int val;
+
+	/* Get Supported EEE */
+	val = ax88179_phy_read_mmd_indirect(dev, MDIO_PCS_EEE_ABLE,
+					    MDIO_MMD_PCS);
+	if (val < 0)
+		return val;
+	data->supported = mmd_eee_cap_to_ethtool_sup_t(val);
+
+	/* Get advertisement EEE */
+	val = ax88179_phy_read_mmd_indirect(dev, MDIO_AN_EEE_ADV,
+					    MDIO_MMD_AN);
+	if (val < 0)
+		return val;
+	data->advertised = mmd_eee_adv_to_ethtool_adv_t(val);
+
+	/* Get LP advertisement EEE */
+	val = ax88179_phy_read_mmd_indirect(dev, MDIO_AN_EEE_LPABLE,
+					    MDIO_MMD_AN);
+	if (val < 0)
+		return val;
+	data->lp_advertised = mmd_eee_adv_to_ethtool_adv_t(val);
+
+	return 0;
+}
+
+static int
+ax88179_ethtool_set_eee(struct usbnet *dev, struct ethtool_eee *data)
+{
+	u16 tmp16 = ethtool_adv_to_mmd_eee_adv_t(data->advertised);
+
+	return ax88179_phy_write_mmd_indirect(dev, MDIO_AN_EEE_ADV,
+					      MDIO_MMD_AN, tmp16);
+}
+
+static int ax88179_chk_eee(struct usbnet *dev)
+{
+	struct ethtool_cmd ecmd = { .cmd = ETHTOOL_GSET };
+	struct ax88179_data *priv = (struct ax88179_data *)dev->data;
+
+	mii_ethtool_gset(&dev->mii, &ecmd);
+
+	if (ecmd.duplex & DUPLEX_FULL) {
+		int eee_lp, eee_cap, eee_adv;
+		u32 lp, cap, adv, supported = 0;
+
+		eee_cap = ax88179_phy_read_mmd_indirect(dev,
+							MDIO_PCS_EEE_ABLE,
+							MDIO_MMD_PCS);
+		if (eee_cap < 0) {
+			priv->eee_active = 0;
+			return false;
+		}
+
+		cap = mmd_eee_cap_to_ethtool_sup_t(eee_cap);
+		if (!cap) {
+			priv->eee_active = 0;
+			return false;
+		}
+
+		eee_lp = ax88179_phy_read_mmd_indirect(dev,
+						       MDIO_AN_EEE_LPABLE,
+						       MDIO_MMD_AN);
+		if (eee_lp < 0) {
+			priv->eee_active = 0;
+			return false;
+		}
+
+		eee_adv = ax88179_phy_read_mmd_indirect(dev,
+							MDIO_AN_EEE_ADV,
+							MDIO_MMD_AN);
+
+		if (eee_adv < 0) {
+			priv->eee_active = 0;
+			return false;
+		}
+
+		adv = mmd_eee_adv_to_ethtool_adv_t(eee_adv);
+		lp = mmd_eee_adv_to_ethtool_adv_t(eee_lp);
+		supported = (ecmd.speed == SPEED_1000) ?
+			     SUPPORTED_1000baseT_Full :
+			     SUPPORTED_100baseT_Full;
+
+		if (!(lp & adv & supported)) {
+			priv->eee_active = 0;
+			return false;
+		}
+
+		priv->eee_active = 1;
+		return true;
+	}
+
+	priv->eee_active = 0;
+	return false;
+}
+
+static void ax88179_disable_eee(struct usbnet *dev)
+{
+	u16 tmp16;
+
+	tmp16 = GMII_PHY_PGSEL_PAGE3;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  GMII_PHY_PAGE_SELECT, 2, &tmp16);
+
+	tmp16 = 0x3246;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  MII_PHYADDR, 2, &tmp16);
+
+	tmp16 = GMII_PHY_PGSEL_PAGE0;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  GMII_PHY_PAGE_SELECT, 2, &tmp16);
+}
+
+static void ax88179_enable_eee(struct usbnet *dev)
+{
+	u16 tmp16;
+
+	tmp16 = GMII_PHY_PGSEL_PAGE3;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  GMII_PHY_PAGE_SELECT, 2, &tmp16);
+
+	tmp16 = 0x3247;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  MII_PHYADDR, 2, &tmp16);
+
+	tmp16 = GMII_PHY_PGSEL_PAGE5;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  GMII_PHY_PAGE_SELECT, 2, &tmp16);
+
+	tmp16 = 0x0680;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  MII_BMSR, 2, &tmp16);
+
+	tmp16 = GMII_PHY_PGSEL_PAGE0;
+	ax88179_write_cmd(dev, AX_ACCESS_PHY, AX88179_PHY_ID,
+			  GMII_PHY_PAGE_SELECT, 2, &tmp16);
+}
+
+static int ax88179_get_eee(struct net_device *net, struct ethtool_eee *edata)
+{
+	struct usbnet *dev = netdev_priv(net);
+	struct ax88179_data *priv = (struct ax88179_data *)dev->data;
+
+	edata->eee_enabled = priv->eee_enabled;
+	edata->eee_active = priv->eee_active;
+
+	return ax88179_ethtool_get_eee(dev, edata);
+}
+
+static int ax88179_set_eee(struct net_device *net, struct ethtool_eee *edata)
+{
+	struct usbnet *dev = netdev_priv(net);
+	struct ax88179_data *priv = (struct ax88179_data *)dev->data;
+	int ret = -EOPNOTSUPP;
+
+	priv->eee_enabled = edata->eee_enabled;
+	if (!priv->eee_enabled) {
+		ax88179_disable_eee(dev);
+	} else {
+		priv->eee_enabled = ax88179_chk_eee(dev);
+		if (!priv->eee_enabled)
+			return -EOPNOTSUPP;
+
+		ax88179_enable_eee(dev);
+	}
+
+	ret = ax88179_ethtool_set_eee(dev, edata);
+	if (ret)
+		return ret;
+
+	mii_nway_restart(&dev->mii);
+
+	usbnet_link_change(dev, 0, 0);
+
+	return ret;
+}
+
+static int ax88179_ioctl(struct net_device *net, struct ifreq *rq, int cmd)
+{
+	struct usbnet *dev = netdev_priv(net);
+	return generic_mii_ioctl(&dev->mii, if_mii(rq), cmd, NULL);
+}
+
+static const struct ethtool_ops ax88179_ethtool_ops = {
+	.get_link		= ethtool_op_get_link,
+	.get_msglevel		= usbnet_get_msglevel,
+	.set_msglevel		= usbnet_set_msglevel,
+	.get_wol		= ax88179_get_wol,
+	.set_wol		= ax88179_set_wol,
+	.get_eeprom_len		= ax88179_get_eeprom_len,
+	.get_eeprom		= ax88179_get_eeprom,
+	.get_eee		= ax88179_get_eee,
+	.set_eee		= ax88179_set_eee,
+	.nway_reset		= usbnet_nway_reset,
+	.get_link_ksettings	= ax88179_get_link_ksettings,
+	.set_link_ksettings	= ax88179_set_link_ksettings,
+};
+
+static void ax88179_set_multicast(struct net_device *net)
+{
+	struct usbnet *dev = netdev_priv(net);
+	struct ax88179_data *data = (struct ax88179_data *)dev->data;
+	u8 *m_filter = ((u8 *)dev->data) + 12;
+
+	data->rxctl = (AX_RX_CTL_START | AX_RX_CTL_AB | AX_RX_CTL_IPE);
 
 	if (net->flags & IFF_PROMISC) {
 		axdev->rxctl |= AX_RX_CTL_PRO;
@@ -806,63 +1086,159 @@ static int ax88179_hw_init(struct ax_device *axdev)
 
 }
 
-static int ax88179_bind(struct ax_device *axdev)
+static void ax88179_unbind(struct usbnet *dev, struct usb_interface *intf)
 {
-	struct net_device *netdev = axdev->netdev;
+	u16 tmp16;
 
-	PRINT_VERSION(axdev, AX_DRIVER_STRING_179_178A);
+	/* Configure RX control register => stop operation */
+	tmp16 = AX_RX_CTL_STOP;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_CTL, 2, 2, &tmp16);
 
-	netdev->features    |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
-			       NETIF_F_SG | NETIF_F_TSO | NETIF_F_FRAGLIST;
-	netdev->hw_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
-			       NETIF_F_SG | NETIF_F_TSO | NETIF_F_FRAGLIST;
+	tmp16 = 0;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &tmp16);
 
-	axdev->tx_casecade_size = TX_CASECADES_SIZE;
-	axdev->gso_max_size = AX_GSO_DEFAULT_SIZE;
-	axdev->mii.supports_gmii = 1;
-	axdev->mii.dev = netdev;
-	axdev->mii.mdio_read = ax_mdio_read;
-	axdev->mii.mdio_write = ax_mdio_write;
-	axdev->mii.phy_id_mask = 0xff;
-	axdev->mii.reg_num_mask = 0xff;
-	axdev->mii.phy_id = AX88179_PHY_ID;
-	axdev->mii.force_media = 0;
-	axdev->mii.advertising = ADVERTISE_10HALF | ADVERTISE_10FULL |
-				 ADVERTISE_100HALF | ADVERTISE_100FULL;
-	netif_set_gso_max_size(netdev, axdev->gso_max_size);
+	/* Power down ethernet PHY */
+	tmp16 = 0;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, &tmp16);
+}
 
-	axdev->bin_setting.custom = 1;
-	axdev->tx_align_len = 4;
+static void
+ax88179_rx_checksum(struct sk_buff *skb, u32 *pkt_hdr)
+{
+	skb->ip_summed = CHECKSUM_NONE;
 
-	netdev->ethtool_ops = &ax88179_ethtool_ops;
-	axdev->netdev->netdev_ops = &ax88179_netdev_ops;
+	/* checksum error bit is set */
+	if ((*pkt_hdr & AX_RXHDR_L3CSUM_ERR) ||
+	    (*pkt_hdr & AX_RXHDR_L4CSUM_ERR))
+		return;
+
+	/* It must be a TCP or UDP packet with a valid checksum */
+	if (((*pkt_hdr & AX_RXHDR_L4_TYPE_MASK) == AX_RXHDR_L4_TYPE_TCP) ||
+	    ((*pkt_hdr & AX_RXHDR_L4_TYPE_MASK) == AX_RXHDR_L4_TYPE_UDP))
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+}
+
+static int ax88179_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
+{
+	struct sk_buff *ax_skb;
+	int pkt_cnt;
+	u32 rx_hdr;
+	u16 hdr_off;
+	u32 *pkt_hdr;
+
+	/* At the end of the SKB, there's a header telling us how many packets
+	 * are bundled into this buffer and where we can find an array of
+	 * per-packet metadata (which contains elements encoded into u16).
+	 */
+
+	/* SKB contents for current firmware:
+	 *   <packet 1> <padding>
+	 *   ...
+	 *   <packet N> <padding>
+	 *   <per-packet metadata entry 1> <dummy header>
+	 *   ...
+	 *   <per-packet metadata entry N> <dummy header>
+	 *   <padding2> <rx_hdr>
+	 *
+	 * where:
+	 *   <packet N> contains pkt_len bytes:
+	 *		2 bytes of IP alignment pseudo header
+	 *		packet received
+	 *   <per-packet metadata entry N> contains 4 bytes:
+	 *		pkt_len and fields AX_RXHDR_*
+	 *   <padding>	0-7 bytes to terminate at
+	 *		8 bytes boundary (64-bit).
+	 *   <padding2> 4 bytes to make rx_hdr terminate at
+	 *		8 bytes boundary (64-bit)
+	 *   <dummy-header> contains 4 bytes:
+	 *		pkt_len=0 and AX_RXHDR_DROP_ERR
+	 *   <rx-hdr>	contains 4 bytes:
+	 *		pkt_cnt and hdr_off (offset of
+	 *		  <per-packet metadata entry 1>)
+	 *
+	 * pkt_cnt is number of entrys in the per-packet metadata.
+	 * In current firmware there is 2 entrys per packet.
+	 * The first points to the packet and the
+	 *  second is a dummy header.
+	 * This was done probably to align fields in 64-bit and
+	 *  maintain compatibility with old firmware.
+	 * This code assumes that <dummy header> and <padding2> are
+	 *  optional.
+	 */
+
+	if (skb->len < 4)
+		return 0;
+	skb_trim(skb, skb->len - 4);
+	memcpy(&rx_hdr, skb_tail_pointer(skb), 4);
+	le32_to_cpus(&rx_hdr);
+	pkt_cnt = (u16)rx_hdr;
+	hdr_off = (u16)(rx_hdr >> 16);
+
+	if (pkt_cnt == 0)
+		return 0;
+
+	/* Make sure that the bounds of the metadata array are inside the SKB
+	 * (and in front of the counter at the end).
+	 */
+	if (pkt_cnt * 4 + hdr_off > skb->len)
+		return 0;
+	pkt_hdr = (u32 *)(skb->data + hdr_off);
+
+	/* Packets must not overlap the metadata array */
+	skb_trim(skb, hdr_off);
+
+	for (; pkt_cnt > 0; pkt_cnt--, pkt_hdr++) {
+		u16 pkt_len_plus_padd;
+		u16 pkt_len;
+
+		le32_to_cpus(pkt_hdr);
+		pkt_len = (*pkt_hdr >> 16) & 0x1fff;
+		pkt_len_plus_padd = (pkt_len + 7) & 0xfff8;
+
+		/* Skip dummy header used for alignment
+		 */
+		if (pkt_len == 0)
+			continue;
+
+		if (pkt_len_plus_padd > skb->len)
+			return 0;
+
+		/* Check CRC or runt packet */
+		if ((*pkt_hdr & (AX_RXHDR_CRC_ERR | AX_RXHDR_DROP_ERR)) ||
+		    pkt_len < 2 + ETH_HLEN) {
+			dev->net->stats.rx_errors++;
+			skb_pull(skb, pkt_len_plus_padd);
+			continue;
+		}
+
+		/* last packet */
+		if (pkt_len_plus_padd == skb->len) {
+			skb_trim(skb, pkt_len);
+
+			/* Skip IP alignment pseudo header */
+			skb_pull(skb, 2);
+
+			ax88179_rx_checksum(skb, pkt_hdr);
+			return 1;
+		}
+
+		ax_skb = netdev_alloc_skb_ip_align(dev->net, pkt_len);
+		if (!ax_skb)
+			return 0;
+		skb_put(ax_skb, pkt_len);
+		memcpy(ax_skb->data, skb->data + 2, pkt_len);
+
+		ax88179_rx_checksum(ax_skb, pkt_hdr);
+		usbnet_skb_return(dev, ax_skb);
+
+		skb_pull(skb, pkt_len_plus_padd);
+	}
 
 	return 0;
 }
 
-static void ax88179_unbind(struct ax_device *axdev)
-{
-
-}
-
-static int ax88179_stop(struct ax_device *axdev)
-{
-	u16 reg16;
-
-	reg16 = AX_RX_CTL_STOP;
-	ax_write_cmd(axdev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE, 2, 2, &reg16);
-
-	reg16 = 0;
-	ax_write_cmd(axdev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, &reg16);
-
-	reg16 = AX_PHYPWR_RSTCTL_BZ;
-	ax_write_cmd(axdev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, &reg16);
-	msleep(200);
-
-	return 0;
-}
-
-static int ax88179_link_reset(struct ax_device *axdev)
+static struct sk_buff *
+ax88179_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
 {
 	u8 reg8[5], link_sts;
 	u16 mode, reg16, delay;
@@ -875,11 +1251,12 @@ static int ax88179_link_reset(struct ax_device *axdev)
 	ax_read_cmd_nopm(axdev, AX_ACCESS_PHY, AX88179_PHY_ID,
 			 GMII_PHY_PHYSR, 2, &reg16, 1);
 
-	if (!(reg16 & GMII_PHY_PHYSR_LINK)) {
-		return -1;
-	} else if (GMII_PHY_PHYSR_GIGA == (reg16 & GMII_PHY_PHYSR_SMASK)) {
-		mode |= AX_MEDIUM_GIGAMODE;
-		if (axdev->netdev->mtu > 1500)
+	if (!(tmp16 & GMII_PHY_PHYSR_LINK)) {
+		netdev_info(dev->net, "ax88179 - Link status is: 0\n");
+		return 0;
+	} else if (GMII_PHY_PHYSR_GIGA == (tmp16 & GMII_PHY_PHYSR_SMASK)) {
+		mode |= AX_MEDIUM_GIGAMODE | AX_MEDIUM_EN_125MHZ;
+		if (dev->net->mtu > 1500)
 			mode |= AX_MEDIUM_JUMBO_EN;
 
 		if (link_sts & AX_USB_SS)
@@ -898,246 +1275,113 @@ static int ax88179_link_reset(struct ax_device *axdev)
 		memcpy(reg8, &AX88179_BULKIN_SIZE[3], 5);
 	}
 
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, reg8);
+	/* RX bulk configuration */
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, tmp);
 
-	if (reg16 & GMII_PHY_PHYSR_FULL)
+	dev->rx_urb_size = (1024 * (tmp[3] + 2));
+
+	if (tmp16 & GMII_PHY_PHYSR_FULL)
 		mode |= AX_MEDIUM_FULL_DUPLEX;
-
-	ax_read_cmd_nopm(axdev, 0x81, 0x8c, 0, 4, &reg32, 1);
-	delay = HZ / 2;
-	if (reg32 & 0x40000000) {
-		unsigned long jtimeout;
-		u16 temp16 = 0;
-
-		ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_RX_CTL,
-				  2, 2, &temp16);
-		ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
-				  2, 2, &mode);
-
-		jtimeout = jiffies + delay;
-		while (time_before(jiffies, jtimeout)) {
-			ax_read_cmd_nopm(axdev, 0x81, 0x8c, 0, 4, &reg32, 1);
-
-			if (!(reg32 & 0x40000000))
-				break;
-
-			reg32 = 0x80000000;
-			ax_write_cmd(axdev, 0x81, 0x8c, 0, 4, &reg32);
-		}
-
-		temp16 = AX_RX_CTL_DROPCRCERR | AX_RX_CTL_START |
-			 AX_RX_CTL_AP | AX_RX_CTL_AMALL | AX_RX_CTL_AB;
-		ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_RX_CTL,
-				  2, 2, &temp16);
-	}
-
-	axdev->rxctl |= AX_RX_CTL_DROPCRCERR | AX_RX_CTL_START | AX_RX_CTL_AB;
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_RX_CTL,
-			  2, 2, &axdev->rxctl);
-
-	mode |= AX_MEDIUM_RECEIVE_EN;
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
 			  2, 2, &mode);
+
+	ax179_data->eee_enabled = ax88179_chk_eee(dev);
+
+	netif_carrier_on(dev->net);
+
+	netdev_info(dev->net, "ax88179 - Link status is: 1\n");
 
 	return 0;
 }
 
-
-static int ax88179_tx_fixup(struct ax_device *axdev, struct tx_desc *desc)
+static int ax88179_reset(struct usbnet *dev)
 {
-	struct sk_buff_head skb_head, *tx_queue = &axdev->tx_queue[0];
-	struct net_device_stats *stats = &axdev->netdev->stats;
-	int remain, ret;
-	u8 *tx_data;
+	u8 buf[5];
+	u16 *tmp16;
+	u8 *tmp;
+	struct ax88179_data *ax179_data = (struct ax88179_data *)dev->data;
+	struct ethtool_eee eee_data;
 
-	__skb_queue_head_init(&skb_head);
-	spin_lock(&tx_queue->lock);
-	skb_queue_splice_init(tx_queue, &skb_head);
-	spin_unlock(&tx_queue->lock);
+	tmp16 = (u16 *)buf;
+	tmp = (u8 *)buf;
 
-	tx_data = desc->head;
-	desc->skb_num = 0;
-	desc->skb_len = 0;
-	remain = axdev->tx_casecade_size;
+	/* Power up ethernet PHY */
+	*tmp16 = 0;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, tmp16);
 
-	while (remain >= ETH_ZLEN + 8) {
-		struct sk_buff *skb;
-		u32 *tx_hdr1, *tx_hdr2;
+	*tmp16 = AX_PHYPWR_RSTCTL_IPRL;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL, 2, 2, tmp16);
+	msleep(500);
 
-		skb = __skb_dequeue(&skb_head);
-		if (!skb)
-			break;
+	*tmp = AX_CLK_SELECT_ACS | AX_CLK_SELECT_BCS;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_CLK_SELECT, 1, 1, tmp);
+	msleep(200);
 
-		if ((skb->len + AX_TX_HEADER_LEN) > remain &&
-		    (skb_shinfo(skb)->gso_size == 0)) {
-			__skb_queue_head(&skb_head, skb);
-			break;
-		}
+	/* Ethernet PHY Auto Detach*/
+	ax88179_auto_detach(dev, 0);
 
-		memset(tx_data, 0, AX_TX_HEADER_LEN);
-		tx_hdr1 = (u32 *)tx_data;
-		tx_hdr2 = tx_hdr1 + 1;
-		*tx_hdr1 = skb->len;
-		*tx_hdr2 = skb_shinfo(skb)->gso_size;
-		cpu_to_le32s(tx_hdr1);
-		cpu_to_le32s(tx_hdr2);
-		tx_data += 8;
+	ax88179_read_cmd(dev, AX_ACCESS_MAC, AX_NODE_ID, ETH_ALEN, ETH_ALEN,
+			 dev->net->dev_addr);
 
-		if (skb_copy_bits(skb, 0, tx_data, skb->len) < 0) {
-			stats->tx_dropped++;
-			dev_kfree_skb_any(skb);
-			continue;
-		}
+	/* RX bulk configuration */
+	memcpy(tmp, &AX88179_BULKIN_SIZE[0], 5);
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, tmp);
 
-		tx_data += skb->len;
-		desc->skb_len += skb->len;
-		desc->skb_num += skb_shinfo(skb)->gso_segs ?: 1;
-		dev_kfree_skb_any(skb);
+	dev->rx_urb_size = 1024 * 20;
 
-		tx_data = __tx_buf_align(tx_data, axdev->tx_align_len);
-		if (*tx_hdr2 > 0)
-			break;
-		remain = axdev->tx_casecade_size -
-			 (int)((void *)tx_data - desc->head);
-	}
+	*tmp = 0x34;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_LOW, 1, 1, tmp);
 
-	if (!skb_queue_empty(&skb_head)) {
-		spin_lock(&tx_queue->lock);
-		skb_queue_splice(&skb_head, tx_queue);
-		spin_unlock(&tx_queue->lock);
-	}
+	*tmp = 0x52;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_HIGH,
+			  1, 1, tmp);
 
-	netif_tx_lock(axdev->netdev);
+	dev->net->features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
+			      NETIF_F_RXCSUM;
 
-	if (netif_queue_stopped(axdev->netdev) &&
-	    skb_queue_len(tx_queue) < axdev->tx_qlen) {
-		netif_wake_queue(axdev->netdev);
-	}
+	dev->net->hw_features |= NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
+				 NETIF_F_RXCSUM;
 
-	netif_tx_unlock(axdev->netdev);
+	/* Enable checksum offload */
+	*tmp = AX_RXCOE_IP | AX_RXCOE_TCP | AX_RXCOE_UDP |
+	       AX_RXCOE_TCPV6 | AX_RXCOE_UDPV6;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RXCOE_CTL, 1, 1, tmp);
 
-	ret = usb_autopm_get_interface_async(axdev->intf);
-	if (ret < 0)
-		goto out_tx_fill;
+	*tmp = AX_TXCOE_IP | AX_TXCOE_TCP | AX_TXCOE_UDP |
+	       AX_TXCOE_TCPV6 | AX_TXCOE_UDPV6;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_TXCOE_CTL, 1, 1, tmp);
 
-	usb_fill_bulk_urb(desc->urb, axdev->udev,
-			  usb_sndbulkpipe(axdev->udev, 3),
-			  desc->head, (int)(tx_data - (u8 *)desc->head),
-			  (usb_complete_t)ax_write_bulk_callback, desc);
+	/* Configure RX control register => start operation */
+	*tmp16 = AX_RX_CTL_DROPCRCERR | AX_RX_CTL_IPE | AX_RX_CTL_START |
+		 AX_RX_CTL_AP | AX_RX_CTL_AMALL | AX_RX_CTL_AB;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_CTL, 2, 2, tmp16);
 
-	ret = usb_submit_urb(desc->urb, GFP_ATOMIC);
-	if (ret < 0)
-		usb_autopm_put_interface_async(axdev->intf);
+	*tmp = AX_MONITOR_MODE_PMETYPE | AX_MONITOR_MODE_PMEPOL |
+	       AX_MONITOR_MODE_RWMP;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_MONITOR_MOD, 1, 1, tmp);
 
-out_tx_fill:
-	return ret;
-}
+	/* Configure default medium type => giga */
+	*tmp16 = AX_MEDIUM_RECEIVE_EN | AX_MEDIUM_TXFLOW_CTRLEN |
+		 AX_MEDIUM_RXFLOW_CTRLEN | AX_MEDIUM_FULL_DUPLEX |
+		 AX_MEDIUM_GIGAMODE;
+	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
+			  2, 2, tmp16);
 
-static void ax88179_rx_checksum(struct sk_buff *skb, u32 *pkt_hdr)
-{
-	skb->ip_summed = CHECKSUM_NONE;
+	ax88179_led_setting(dev);
 
-	if ((*pkt_hdr & AX_RXHDR_L3CSUM_ERR) ||
-	    (*pkt_hdr & AX_RXHDR_L4CSUM_ERR))
-		return;
+	ax179_data->eee_enabled = 0;
+	ax179_data->eee_active = 0;
 
-	if (((*pkt_hdr & AX_RXHDR_L4_TYPE_MASK) == AX_RXHDR_L4_TYPE_TCP) ||
-	    ((*pkt_hdr & AX_RXHDR_L4_TYPE_MASK) == AX_RXHDR_L4_TYPE_UDP))
-		skb->ip_summed = CHECKSUM_UNNECESSARY;
-}
+	ax88179_disable_eee(dev);
 
-static void ax88179_rx_fixup
-(struct ax_device *axdev, struct rx_desc *desc, int *work_done, int budget)
-{
-	u8 *rx_data;
-	u32 const actual_length = desc->urb->actual_length;
-	u32 rx_hdr = 0, pkt_hdr = 0, pkt_hdr_curr = 0, hdr_off = 0;
-	u32 aa = 0;
-	int pkt_cnt = 0;
-	struct net_device *netdev = axdev->netdev;
-	struct net_device_stats *stats = ax_get_stats(netdev);
+	ax88179_ethtool_get_eee(dev, &eee_data);
+	eee_data.advertised = 0;
+	ax88179_ethtool_set_eee(dev, &eee_data);
 
-	memcpy(&rx_hdr, (((u8 *)desc->head) + actual_length - 4),
-	       sizeof(rx_hdr));
-	le32_to_cpus(&rx_hdr);
+	/* Restart autoneg */
+	mii_nway_restart(&dev->mii);
 
-	pkt_cnt = rx_hdr & 0xFF;
-	pkt_hdr_curr = hdr_off = rx_hdr >> 16;
-
-	aa = (actual_length - (((pkt_cnt + 2) & 0xFE) * 4));
-	if ((aa != hdr_off) ||
-	    (hdr_off >= desc->urb->actual_length) ||
-	    (pkt_cnt == 0)) {
-		desc->urb->actual_length = 0;
-		stats->rx_length_errors++;
-		return;
-	}
-
-	rx_data = desc->head;
-	while (pkt_cnt--) {
-		u32 pkt_len;
-		struct sk_buff *skb;
-
-		memcpy(&pkt_hdr, (((u8 *)desc->head) + pkt_hdr_curr),
-		       sizeof(pkt_hdr));
-		pkt_hdr_curr += 4;
-
-		le32_to_cpus(&pkt_hdr);
-		pkt_len = (pkt_hdr >> 16) & 0x1FFF;
-
-		if (pkt_hdr & AX_RXHDR_CRC_ERR) {
-			stats->rx_crc_errors++;
-			goto find_next_rx;
-		}
-		if (pkt_hdr & AX_RXHDR_DROP_ERR) {
-			stats->rx_dropped++;
-			goto find_next_rx;
-		}
-
-		skb = napi_alloc_skb(napi, pkt_len);
-		if (!skb) {
-			stats->rx_dropped++;
-			goto find_next_rx;
-		}
-
-		memcpy(skb->data, rx_data, pkt_len);
-		skb_put(skb, pkt_len);
-
-		ax88179_rx_checksum(skb, &pkt_hdr);
-
-		skb->protocol = eth_type_trans(skb, netdev);
-
-		if (*work_done < budget) {
-			napi_gro_receive(&axdev->napi, skb);
-			*work_done += 1;
-			stats->rx_packets++;
-			stats->rx_bytes += pkt_len;
-		} else {
-			__skb_queue_tail(&axdev->rx_queue, skb);
-		}
-find_next_rx:
-		rx_data += (pkt_len + 7) & 0xFFF8;
-	}
-}
-
-static int ax88179_system_suspend(struct ax_device *axdev)
-{
-	u16 reg16;
-
-	ax_read_cmd_nopm(axdev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
-			 2, 2, &reg16, 1);
-	reg16 &= ~AX_MEDIUM_RECEIVE_EN;
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_MEDIUM_STATUS_MODE,
-			  2, 2, &reg16);
-
-	ax_read_cmd_nopm(axdev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
-			 2, 2, &reg16, 1);
-	reg16 |= AX_PHYPWR_RSTCTL_IPRL;
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_PHYPWR_RSTCTL,
-			  2, 2, &reg16);
-
-	reg16 = AX_RX_CTL_STOP;
-	ax_write_cmd_nopm(axdev, AX_ACCESS_MAC, AX_RX_CTL, 2, 2, &reg16);
+	usbnet_link_change(dev, 0, 0);
 
 	return 0;
 }
